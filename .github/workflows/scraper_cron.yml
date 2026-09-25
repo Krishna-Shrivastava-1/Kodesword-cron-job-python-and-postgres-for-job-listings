@@ -1,0 +1,33 @@
+name: Scheduled Job Scraper & DB Swap
+
+on:
+  schedule:
+    # Runs every day at midnight UTC (Adjust CRON schedule as needed)
+    - cron: '0 0 * * *'
+  # Allows you to manually trigger the workflow from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip' # Speeds up future runs
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run Scraper and Database Swap
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python main.py
