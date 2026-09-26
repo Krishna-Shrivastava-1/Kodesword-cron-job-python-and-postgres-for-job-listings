@@ -2,7 +2,7 @@ name: Schedule Test
 
 on:
   schedule:
-    - cron: '10 4 * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,6 +12,6 @@ jobs:
     steps:
       - name: Test scheduled execution
         run: |
-          echo "Workflow event: ${{ github.event_name }}"
-          echo "UTC time:"
+          echo "EVENT: ${{ github.event_name }}"
+          echo "UTC:"
           date -u
