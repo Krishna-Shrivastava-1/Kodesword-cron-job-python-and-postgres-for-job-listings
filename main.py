@@ -1415,7 +1415,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from dateutil import parser as date_parser
 import httpx
-
+from database import save_jobs_alternating
 # =====================================================================
 # 1. CONFIGURATION & LOGGING
 # =====================================================================
