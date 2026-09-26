@@ -54,6 +54,7 @@ from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from dateutil import parser as date_parser
 import httpx
 from database import save_jobs_alternating
+
 # =====================================================================
 # 1. CONFIGURATION & LOGGING
 # =====================================================================
@@ -1333,6 +1334,7 @@ async def main():
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             json.dump(clean_jobs, f, indent=2, ensure_ascii=False)
         logger.info(f"Debug JSON written to {OUTPUT_FILE}")
+    # sys.exit(0)
 
 
 if __name__ == "__main__":

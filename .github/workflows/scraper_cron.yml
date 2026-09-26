@@ -3,7 +3,7 @@ name: Scheduled Job Scraper & DB Swap
 on:
   schedule:
     # Runs every day at midnight UTC (Adjust CRON schedule as needed)
-    - cron: '0 0 * * *'
+    - cron: '17 0 * * *'
   # Allows you to manually trigger the workflow from the Actions tab
   workflow_dispatch:
 
