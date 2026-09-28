@@ -1,3 +1,5 @@
+
+
 # """
 # GlobalTechHarvester v2
 # =======================
@@ -54,7 +56,7 @@
 # from dateutil import parser as date_parser
 # import httpx
 # from database import save_jobs_alternating
-
+# from companymetadata import process_and_save_company_metadata
 # # =====================================================================
 # # 1. CONFIGURATION & LOGGING
 # # =====================================================================
@@ -471,6 +473,18 @@
 #     re.I,
 # )
 
+# # FIX: "early career" wasn't in the Entry/Junior vocabulary at all (e.g. Anduril's
+# # "2027 Early Career Software Engineer" fell through every keyword check and landed
+# # on the Mid-Level default, purely for lack of a matching word -- not a wrong signal,
+# # just a missing one). Also adds detection of the very common "20XX New Grad" /
+# # "Class of 20XX" graduating-year prefix pattern used by many big tech new-grad reqs.
+# ENTRY_LEVEL_RE = re.compile(
+#     r"\b(entry[-\s]?level|junior|jr\.?|fresher|graduate|new[-\s]?grad|associate|"
+#     r"early[-\s]?career|university grad(?:uate)?|campus hire|class of 20\d{2})\b|"
+#     r"\b20\d{2}\s+(?:new[-\s]?grad|early[-\s]?career|graduate|university)\b",
+#     re.I,
+# )
+
 
 # def strip_html(raw_html: str) -> str:
 #     """
@@ -566,7 +580,7 @@
 #         return emp_type, "Senior"
 #     if min_years is not None and 2 <= min_years <= 4:
 #         return emp_type, "Mid-Level"
-#     if re.search(r"\b(entry|junior|jr\.?|fresher|graduate|new grad|associate)\b", combined_short) and (min_years is None or min_years <= 2):
+#     if re.search(ENTRY_LEVEL_RE, combined_short) and (min_years is None or min_years <= 2):
 #         return emp_type, "Entry / Junior"
 
 #     return emp_type, "Mid-Level"
@@ -624,7 +638,7 @@
 # # =====================================================================
 # # 4. ROW BUILDER
 # # =====================================================================
-
+# # complete description no 400 limited
 # def build_job_records(
 #     company_name: str, title: str, role_category: str, ats_source: str, external_id: str,
 #     apply_url: str, published_at: str, raw_locations, ats_commitment: str = "",
@@ -634,7 +648,9 @@
 #     locations = split_and_parse_locations(raw_locations)
 #     cleaned_url = clean_application_url(apply_url)
 #     now_iso = NOW_UTC.isoformat()
-#     snippet = content_text[:400].strip() + ("..." if len(content_text) > 400 else "") if content_text else ""
+    
+#     # Store complete description text instead of truncating to 400 chars
+#     full_description = content_text.strip() if content_text else None
 #     records = []
 
 #     for idx, loc in enumerate(locations):
@@ -657,7 +673,7 @@
 #             "country_code": loc["country_code"],
 #             "continent": loc["continent"],
 #             "location_display": loc["location_display"],
-#             "description_snippet": snippet or None,
+#             "description_snippet": full_description,
 #             "apply_url": cleaned_url,
 #             "ats_source": ats_source,
 #             "external_job_id": str(external_id),
@@ -668,6 +684,50 @@
 #         })
 
 #     return records
+# # 400 char description
+# # def build_job_records(
+# #     company_name: str, title: str, role_category: str, ats_source: str, external_id: str,
+# #     apply_url: str, published_at: str, raw_locations, ats_commitment: str = "",
+# #     content_text: str = "", department: str = "",
+# # ) -> list:
+# #     emp_type, exp_level = extract_employment_and_experience(title, ats_commitment, content_text)
+# #     locations = split_and_parse_locations(raw_locations)
+# #     cleaned_url = clean_application_url(apply_url)
+# #     now_iso = NOW_UTC.isoformat()
+# #     snippet = content_text[:400].strip() + ("..." if len(content_text) > 400 else "") if content_text else ""
+# #     records = []
+
+# #     for idx, loc in enumerate(locations):
+# #         loc_key = f"{loc['country_code']}_{loc['city'] or loc['state'] or 'all'}_{idx}"
+# #         stable_seed = f"{ats_source}_{company_name}_{external_id}_{loc_key}"
+# #         row_uuid = str(uuid.uuid5(UUID_NAMESPACE, stable_seed))
+
+# #         records.append({
+# #             "id": row_uuid,
+# #             "title": title,
+# #             "company_name": company_name,
+# #             "department": department or None,
+# #             "employment_type": emp_type,
+# #             "role_category": role_category,
+# #             "experience_level": exp_level,
+# #             "workplace_type": loc["workplace_type"],
+# #             "city": loc["city"],
+# #             "state": loc["state"],
+# #             "country": loc["country"],
+# #             "country_code": loc["country_code"],
+# #             "continent": loc["continent"],
+# #             "location_display": loc["location_display"],
+# #             "description_snippet": snippet or None,
+# #             "apply_url": cleaned_url,
+# #             "ats_source": ats_source,
+# #             "external_job_id": str(external_id),
+# #             "status": "ACTIVE",
+# #             "published_at": published_at,
+# #             "created_at": now_iso,
+# #             "updated_at": now_iso,
+# #         })
+
+# #     return records
 
 # # =====================================================================
 # # 5. HTTP HELPERS (NEW: retry with backoff on 429/5xx)
@@ -1299,8 +1359,18 @@
 #                 job["company_hq_country"] = meta.get("company_hq_country")
 #                 job["company_symbol"] = meta.get("company_symbol")
 #                 clean_jobs.append(job)
-
 #     save_jobs_alternating(clean_jobs)
+#     await process_and_save_company_metadata(
+#         [
+#             {
+#                 "company_name": job.get("company_name"),
+#                 "symbol": job.get("company_symbol"),
+#                 "website": job.get("company_website"),
+#             }
+#             for job in clean_jobs
+#         ]
+#     )
+
 #     ats_breakdown, countries, emp_types, exp_levels = {}, {}, {}, {}
 #     for job in clean_jobs:
 #         ats_breakdown[job["ats_source"]] = ats_breakdown.get(job["ats_source"], 0) + 1
@@ -1331,14 +1401,41 @@
 #     print("=" * 80 + "\n")
 
 #     if os.getenv("WRITE_LOCAL_JSON", "false").lower() == "true":
-#         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-#             json.dump(clean_jobs, f, indent=2, ensure_ascii=False)
-#         logger.info(f"Debug JSON written to {OUTPUT_FILE}")
-#     # sys.exit(0)
+#             with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+#                 json.dump(clean_jobs, f, indent=2, ensure_ascii=False)
+#             logger.info(f"Debug JSON written to {OUTPUT_FILE}")
 
 
 # if __name__ == "__main__":
 #     asyncio.run(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1416,6 +1513,7 @@ from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 from dateutil import parser as date_parser
 import httpx
 from database import save_jobs_alternating
+from companymetadata import process_and_save_company_metadata
 # =====================================================================
 # 1. CONFIGURATION & LOGGING
 # =====================================================================
@@ -1443,6 +1541,10 @@ RETRY_BACKOFF_BASE = 0.75  # seconds
 # freshness signal for this ATS instead of excluding by createdAt age.
 # Flip to False to enforce the strict 30-day-since-creation rule instead.
 LEVER_TREAT_OPEN_AS_FRESH = True
+
+# NEW: replaces the old hard 400-char truncation (see build_job_records).
+# Generous safety cap, not a real limit -- normal descriptions never approach this.
+MAX_DESCRIPTION_CHARS = 20000
 
 # NEW: Workday's list endpoint (POST .../jobs) omits department and sometimes
 # omits locationsText entirely, and never includes the description. Set this to
@@ -2007,7 +2109,18 @@ def build_job_records(
     locations = split_and_parse_locations(raw_locations)
     cleaned_url = clean_application_url(apply_url)
     now_iso = NOW_UTC.isoformat()
-    snippet = content_text[:400].strip() + ("..." if len(content_text) > 400 else "") if content_text else ""
+    # FIX: was hard-truncated to 400 chars, which is too short for Google for
+    # Jobs eligibility (Google wants the full description) and for a job-detail
+    # page to actually be useful to a reader. The description_snippet column is
+    # Postgres TEXT (unlimited), so the only real constraint was this line.
+    # MAX_DESCRIPTION_CHARS is a generous safety cap, not a designed limit --
+    # it only guards against a pathological/garbage upstream response, not
+    # against normal job descriptions (which are essentially never anywhere
+    # close to 20,000 characters).
+    snippet = (
+        content_text[:MAX_DESCRIPTION_CHARS].strip() + ("..." if len(content_text) > MAX_DESCRIPTION_CHARS else "")
+        if content_text else ""
+    )
     records = []
 
     for idx, loc in enumerate(locations):
@@ -2254,9 +2367,74 @@ async def fetch_ashby(client: httpx.AsyncClient, slug: str, sem: asyncio.Semapho
             return []
 
 
+async def _fetch_smartrecruiters_detail(client: httpx.AsyncClient, slug: str, posting_id: str) -> str:
+    """
+    Fetches the per-posting description. SmartRecruiters' exact detail JSON
+    shape isn't something I could verify against a live response when writing
+    this (network here is locked to package registries), so rather than
+    assume one exact path, this tries several plausible nestings seen in
+    SmartRecruiters' own docs/third-party integrations:
+      (a) data["jobAd"]["sections"][key] = {"text": "..."}
+      (b) data["sections"][key] = {"text": "..."}                (no jobAd wrapper)
+      (c) data["jobAd"][key] = {"text": "..."} or a plain string (no "sections" level)
+    If descriptions are still coming back empty after this, the real fix is a
+    5-minute one: log.debug below prints the raw JSON for one posting at DEBUG
+    level -- run with logging.basicConfig(level=logging.DEBUG) once, paste me
+    that one printed dict, and the exact key path can be corrected for good
+    instead of guessed at again.
+    """
+    url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{posting_id}"
+    try:
+        res = await _request_with_retry(client, "GET", url, headers=HEADERS)
+        if res.status_code != 200:
+            logger.debug(f"smartrecruiters detail {posting_id}: HTTP {res.status_code}")
+            return ""
+        data = res.json()
+    except Exception as e:
+        logger.debug(f"smartrecruiters detail {posting_id} failed: {e}")
+        return ""
+
+    def _section_text(container: dict, key: str) -> str:
+        val = container.get(key)
+        if isinstance(val, dict):
+            return val.get("text") or val.get("value") or ""
+        if isinstance(val, str):
+            return val
+        return ""
+
+    job_ad = data.get("jobAd") or {}
+    sections = job_ad.get("sections") if isinstance(job_ad.get("sections"), dict) else None
+    top_sections = data.get("sections") if isinstance(data.get("sections"), dict) else None
+
+    parts = []
+    for key in ("jobDescription", "qualifications", "additionalInformation"):
+        text = ""
+        if sections:
+            text = _section_text(sections, key)
+        if not text and top_sections:
+            text = _section_text(top_sections, key)
+        if not text and isinstance(job_ad, dict):
+            text = _section_text(job_ad, key)
+        if text.strip():
+            parts.append(strip_html(text))
+
+    if not parts:
+        # Nothing matched any known shape -- log the raw keys we DID see, so a
+        # single DEBUG-level run pinpoints the real structure immediately.
+        logger.debug(f"smartrecruiters detail {posting_id}: no description matched. Top-level keys: {list(data.keys())}, jobAd keys: {list(job_ad.keys()) if isinstance(job_ad, dict) else 'N/A'}")
+
+    return "\n\n".join(parts)
+
+
 async def fetch_smartrecruiters(client: httpx.AsyncClient, slug: str, sem: asyncio.Semaphore) -> list:
-    """NEW: paginated -- the old version silently stopped at page 1 (100 postings)."""
-    jobs = []
+    """
+    NEW: paginated -- the old version silently stopped at page 1 (100 postings).
+    NEW: fetches the full description via the per-posting detail endpoint for
+    every candidate that survives the title/freshness filter (same two-phase
+    pattern as fetch_workday: filter cheaply first, then only pay the extra
+    request for postings that actually matter).
+    """
+    candidates = []
     comp_name = slug.replace("-", " ").title()
     offset = 0
     page_size = 100
@@ -2296,19 +2474,40 @@ async def fetch_smartrecruiters(client: httpx.AsyncClient, slug: str, sem: async
                 if not raw_locs:
                     raw_locs = [""]
 
-                jobs.extend(build_job_records(
-                    company_name=comp_name, title=title, role_category=category,
-                    ats_source="SmartRecruiters", external_id=str(j.get("id")),
-                    apply_url=f"https://jobs.smartrecruiters.com/{slug}/{j.get('id')}",
-                    published_at=pub_date, raw_locations=raw_locs,
-                    ats_commitment=j.get("typeOfEmployment", {}).get("label", ""),
-                    department=(j.get("department") or {}).get("label", ""),
-                ))
+                candidates.append({
+                    "title": title, "category": category, "pub_date": pub_date,
+                    "posting_id": str(j.get("id")), "raw_locs": raw_locs,
+                    "commitment": j.get("typeOfEmployment", {}).get("label", ""),
+                    "department": (j.get("department") or {}).get("label", ""),
+                })
 
             total_found = data.get("totalFound", 0)
             offset += page_size
             if offset >= total_found or len(content) < page_size:
                 break
+
+    if not candidates:
+        return []
+
+    detail_sem = asyncio.Semaphore(10)
+
+    async def _enrich(c):
+        async with detail_sem:
+            description = await _fetch_smartrecruiters_detail(client, slug, c["posting_id"])
+        return c, description
+
+    enriched = await asyncio.gather(*(_enrich(c) for c in candidates))
+
+    jobs = []
+    for c, description in enriched:
+        jobs.extend(build_job_records(
+            company_name=comp_name, title=c["title"], role_category=c["category"],
+            ats_source="SmartRecruiters", external_id=c["posting_id"],
+            apply_url=f"https://jobs.smartrecruiters.com/{slug}/{c['posting_id']}",
+            published_at=c["pub_date"], raw_locations=c["raw_locs"],
+            ats_commitment=c["commitment"], department=c["department"],
+            content_text=description,
+        ))
 
     return jobs
 
@@ -2673,7 +2872,16 @@ async def main():
                 job["company_symbol"] = meta.get("company_symbol")
                 clean_jobs.append(job)
     save_jobs_alternating(clean_jobs)
-
+    await process_and_save_company_metadata(
+        [
+            {
+                "company_name": job.get("company_name"),
+                "symbol": job.get("company_symbol"),
+                "website": job.get("company_website"),
+            }
+            for job in clean_jobs
+        ]
+    )
     ats_breakdown, countries, emp_types, exp_levels = {}, {}, {}, {}
     for job in clean_jobs:
         ats_breakdown[job["ats_source"]] = ats_breakdown.get(job["ats_source"], 0) + 1
@@ -2704,9 +2912,9 @@ async def main():
     print("=" * 80 + "\n")
 
     if os.getenv("WRITE_LOCAL_JSON", "false").lower() == "true":
-            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-                json.dump(clean_jobs, f, indent=2, ensure_ascii=False)
-            logger.info(f"Debug JSON written to {OUTPUT_FILE}")
+                with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                    json.dump(clean_jobs, f, indent=2, ensure_ascii=False)
+                logger.info(f"Debug JSON written to {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
