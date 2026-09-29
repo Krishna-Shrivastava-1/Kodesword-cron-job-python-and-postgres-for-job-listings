@@ -460,8 +460,9 @@ from database import get_existing_company_names, upsert_companies
 
 logger = logging.getLogger(__name__)
 
-THECOMPANIESAPI_TOKEN = os.getenv("THECOMPANIESAPI_TOKEN", "nPXevluBvHSw7tSi5bBtTurwfMT4NQ9C")
-
+THECOMPANIESAPI_TOKEN = os.getenv("THECOMPANIESAPI_TOKEN", "ehU9ZnH8lISQ31wJyLHZFwn4UeTxibRT")
+#1)  nPXevluBvHSw7tSi5bBtTurwfMT4NQ9C
+#2)  ehU9ZnH8lISQ31wJyLHZFwn4UeTxibRT
 STEALTH_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
