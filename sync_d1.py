@@ -303,7 +303,6 @@
 
 
 
-
 import os
 import re
 import json
@@ -337,10 +336,13 @@ def compute_is_remote(workplace_norm):
     return 0
 
 
-def sql_str(v):
+def sql_str(v, max_len=None):
     if v is None:
         return "NULL"
-    s = str(v).replace("\x00", "").replace("'", "''")
+    s = str(v).replace("\x00", "")
+    if max_len and len(s) > max_len:
+        s = s[:max_len]
+    s = s.replace("'", "''")
     return f"'{s}'"
 
 
@@ -352,6 +354,24 @@ def to_ms(dt):
     if dt is None:
         return 0
     return int(dt.timestamp() * 1000)
+
+
+def append_batched_inserts(lines, table_name, cols_sql, value_strings, max_bytes=50000, max_rows=20):
+    prefix = f"INSERT INTO {table_name} ({cols_sql}) VALUES "
+    batch = []
+    batch_bytes = len(prefix)
+
+    for v in value_strings:
+        v_bytes = len(v.encode("utf-8")) + 2
+        if batch and (len(batch) >= max_rows or batch_bytes + v_bytes > max_bytes):
+            lines.append(prefix + ",\n".join(batch) + ";")
+            batch = []
+            batch_bytes = len(prefix)
+        batch.append(v)
+        batch_bytes += v_bytes
+
+    if batch:
+        lines.append(prefix + ",\n".join(batch) + ";")
 
 
 def main():
@@ -394,7 +414,7 @@ def main():
     print(f"Loaded {len(neon_jobs)} active jobs from Neon")
 
     now_ms = int(time.time() * 1000)
-    job_rows = []
+    job_values = []
     company_agg = {}
     all_countries = set()
 
@@ -411,38 +431,42 @@ def main():
         if country_val:
             all_countries.add(country_val)
 
-        job_rows.append({
-            "id": jid,
-            "generated_unique_id": gen_uid,
-            "short_id": short_id,
-            "title": j["title"] or "",
-            "title_norm": norm(j["title"]),
-            "company_name": j["company_name"] or "",
-            "company_norm": c_norm,
-            "department": j["department"],
-            "employment_type": j["employment_type"],
-            "employment_norm": norm(j["employment_type"]),
-            "role_category": j["role_category"],
-            "role_norm": norm(j["role_category"]),
-            "experience_level": j["experience_level"],
-            "experience_norm": norm(j["experience_level"]),
-            "workplace_type": j["workplace_type"],
-            "workplace_norm": w_norm,
-            "is_remote": compute_is_remote(w_norm),
-            "city": j["city"],
-            "state": j["state"],
-            "country": country_val or None,
-            "country_norm": norm(country_val),
-            "country_code": j["country_code"],
-            "continent": j["continent"],
-            "location_display": j["location_display"],
-            "description_snippet": j["description_snippet"],
-            "apply_url": j["apply_url"],
-            "ats_source": j["ats_source"],
-            "published_at": j["published_at"].isoformat() if j["published_at"] else None,
-            "published_ms": pub_ms,
-            "latest_ms": latest_ms,
-        })
+        job_values.append(
+            "("
+            + ", ".join([
+                sql_str(jid),
+                sql_str(gen_uid),
+                sql_str(short_id),
+                sql_str(j["title"] or ""),
+                sql_str(norm(j["title"])),
+                sql_str(j["company_name"] or ""),
+                sql_str(c_norm),
+                sql_str(j["department"]),
+                sql_str(j["employment_type"]),
+                sql_str(norm(j["employment_type"])),
+                sql_str(j["role_category"]),
+                sql_str(norm(j["role_category"])),
+                sql_str(j["experience_level"]),
+                sql_str(norm(j["experience_level"])),
+                sql_str(j["workplace_type"]),
+                sql_str(w_norm),
+                sql_int(compute_is_remote(w_norm)),
+                sql_str(j["city"]),
+                sql_str(j["state"]),
+                sql_str(country_val or None),
+                sql_str(norm(country_val)),
+                sql_str(j["country_code"]),
+                sql_str(j["continent"]),
+                sql_str(j["location_display"]),
+                sql_str(j["description_snippet"], max_len=20000),
+                sql_str(j["apply_url"]),
+                sql_str(j["ats_source"]),
+                sql_str(j["published_at"].isoformat() if j["published_at"] else None),
+                sql_int(pub_ms),
+                sql_int(latest_ms),
+            ])
+            + ")"
+        )
 
         if c_norm not in company_agg:
             company_agg[c_norm] = {
@@ -458,7 +482,7 @@ def main():
         if country_val:
             agg["countries"].add(country_val)
 
-    # 4. Build SQL: First remove old data, then insert new data
+    # 4. Build SQL: First remove old data, then insert new data (max 50 KB per statement)
     lines = [
         "DROP TRIGGER IF EXISTS trg_jobs_auto_cols;",
         "DELETE FROM jobs;",
@@ -472,94 +496,51 @@ def main():
         "city, state, country, country_norm, country_code, continent, location_display, "
         "description_snippet, apply_url, ats_source, published_at, published_ms, latest_ms"
     )
-    for i in range(0, len(job_rows), 50):
-        batch = job_rows[i : i + 50]
-        vals = []
-        for r in batch:
-            vals.append(
-                "("
-                + ", ".join([
-                    sql_str(r["id"]),
-                    sql_str(r["generated_unique_id"]),
-                    sql_str(r["short_id"]),
-                    sql_str(r["title"]),
-                    sql_str(r["title_norm"]),
-                    sql_str(r["company_name"]),
-                    sql_str(r["company_norm"]),
-                    sql_str(r["department"]),
-                    sql_str(r["employment_type"]),
-                    sql_str(r["employment_norm"]),
-                    sql_str(r["role_category"]),
-                    sql_str(r["role_norm"]),
-                    sql_str(r["experience_level"]),
-                    sql_str(r["experience_norm"]),
-                    sql_str(r["workplace_type"]),
-                    sql_str(r["workplace_norm"]),
-                    sql_int(r["is_remote"]),
-                    sql_str(r["city"]),
-                    sql_str(r["state"]),
-                    sql_str(r["country"]),
-                    sql_str(r["country_norm"]),
-                    sql_str(r["country_code"]),
-                    sql_str(r["continent"]),
-                    sql_str(r["location_display"]),
-                    sql_str(r["description_snippet"]),
-                    sql_str(r["apply_url"]),
-                    sql_str(r["ats_source"]),
-                    sql_str(r["published_at"]),
-                    sql_int(r["published_ms"]),
-                    sql_int(r["latest_ms"]),
-                ])
-                + ")"
-            )
-        lines.append(f"INSERT INTO jobs ({job_cols}) VALUES " + ",\n".join(vals) + ";")
+    append_batched_inserts(lines, "jobs", job_cols, job_values, max_bytes=50000, max_rows=20)
 
     cs_cols = (
         "company_norm, company_match, company_name, logo_url, website, description, "
         "ceo, full_time_employees, industry, city, state, country, countries_json, "
         "total_openings, latest_opening"
     )
-    cs_items = list(company_agg.items())
-    for i in range(0, len(cs_items), 50):
-        batch = cs_items[i : i + 50]
-        vals = []
-        for c_norm, agg in batch:
-            meta = companies_meta.get(c_norm, {})
-            c_match = re.sub(r"[-_]+", " ", c_norm)
-            countries_json = json.dumps(sorted(agg["countries"]))
-            vals.append(
-                "("
-                + ", ".join([
-                    sql_str(c_norm),
-                    sql_str(c_match),
-                    sql_str(agg["company_name"]),
-                    sql_str(meta.get("logo_url")),
-                    sql_str(meta.get("website")),
-                    sql_str(meta.get("description")),
-                    sql_str(meta.get("ceo")),
-                    sql_str(meta.get("full_time_employees")),
-                    sql_str(meta.get("industry")),
-                    sql_str(meta.get("city")),
-                    sql_str(meta.get("state")),
-                    sql_str(meta.get("country")),
-                    sql_str(countries_json),
-                    sql_int(agg["total_openings"]),
-                    sql_int(agg["latest_opening"]),
-                ])
-                + ")"
-            )
-        lines.append(f"INSERT INTO companies_summary ({cs_cols}) VALUES " + ",\n".join(vals) + ";")
+    cs_values = []
+    for c_norm, agg in company_agg.items():
+        meta = companies_meta.get(c_norm, {})
+        c_match = re.sub(r"[-_]+", " ", c_norm)
+        countries_json = json.dumps(sorted(agg["countries"]))
+        cs_values.append(
+            "("
+            + ", ".join([
+                sql_str(c_norm),
+                sql_str(c_match),
+                sql_str(agg["company_name"]),
+                sql_str(meta.get("logo_url")),
+                sql_str(meta.get("website")),
+                sql_str(meta.get("description"), max_len=20000),
+                sql_str(meta.get("ceo")),
+                sql_str(meta.get("full_time_employees")),
+                sql_str(meta.get("industry")),
+                sql_str(meta.get("city")),
+                sql_str(meta.get("state")),
+                sql_str(meta.get("country")),
+                sql_str(countries_json),
+                sql_int(agg["total_openings"]),
+                sql_int(agg["latest_opening"]),
+            ])
+            + ")"
+        )
+    append_batched_inserts(lines, "companies_summary", cs_cols, cs_values, max_bytes=50000, max_rows=20)
 
     all_countries_json = json.dumps(sorted(all_countries))
     lines.append(
         f"INSERT OR REPLACE INTO meta_stats (id, total_jobs, total_companies, countries_json, updated_at) "
-        f"VALUES (1, {len(job_rows)}, {len(company_agg)}, {sql_str(all_countries_json)}, {now_ms});"
+        f"VALUES (1, {len(job_values)}, {len(company_agg)}, {sql_str(all_countries_json)}, {now_ms});"
     )
 
     with open("sync.sql", "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    print("Generated sync.sql successfully!")
+    print(f"Generated sync.sql successfully ({len(lines)} SQL statements)!")
 
 
 if __name__ == "__main__":
