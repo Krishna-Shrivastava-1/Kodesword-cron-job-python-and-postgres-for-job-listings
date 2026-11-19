@@ -307,10 +307,14 @@ import os
 import re
 import json
 import time
+import urllib.request
 import psycopg2
 import psycopg2.extras
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+CF_ACCOUNT_ID = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+CF_D1_DATABASE_ID = os.environ["CLOUDFLARE_D1_DATABASE_ID"]
+CF_API_TOKEN = os.environ["CLOUDFLARE_API_TOKEN"]
 
 
 def norm(v):
@@ -356,8 +360,9 @@ def to_ms(dt):
     return int(dt.timestamp() * 1000)
 
 
-def append_batched_inserts(lines, table_name, cols_sql, value_strings, max_bytes=50000, max_rows=20):
-    prefix = f"INSERT INTO {table_name} ({cols_sql}) VALUES "
+def append_batched_inserts(lines, table_name, cols_sql, value_strings, max_bytes=50000, max_rows=20, or_replace=False):
+    verb = "INSERT OR REPLACE INTO" if or_replace else "INSERT INTO"
+    prefix = f"{verb} {table_name} ({cols_sql}) VALUES "
     batch = []
     batch_bytes = len(prefix)
 
@@ -372,6 +377,26 @@ def append_batched_inserts(lines, table_name, cols_sql, value_strings, max_bytes
 
     if batch:
         lines.append(prefix + ",\n".join(batch) + ";")
+
+
+def fetch_d1_existing_jobs():
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/d1/database/{CF_D1_DATABASE_ID}/query"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"sql": "SELECT id, generated_unique_id FROM jobs;"}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {CF_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["result"][0].get("results", [])
+    except Exception as e:
+        print(f"Warning: could not fetch existing D1 jobs ({e}), falling back to full replace.")
+        return None
 
 
 def main():
@@ -414,7 +439,7 @@ def main():
     print(f"Loaded {len(neon_jobs)} active jobs from Neon")
 
     now_ms = int(time.time() * 1000)
-    job_values = []
+    neon_by_uid = {}
     company_agg = {}
     all_countries = set()
 
@@ -431,7 +456,7 @@ def main():
         if country_val:
             all_countries.add(country_val)
 
-        job_values.append(
+        value_sql = (
             "("
             + ", ".join([
                 sql_str(jid),
@@ -467,6 +492,7 @@ def main():
             ])
             + ")"
         )
+        neon_by_uid[gen_uid] = value_sql
 
         if c_norm not in company_agg:
             company_agg[c_norm] = {
@@ -482,12 +508,31 @@ def main():
         if country_val:
             agg["countries"].add(country_val)
 
-    # 4. Build SQL: First remove old data, then insert new data (max 50 KB per statement)
-    lines = [
-        "DROP TRIGGER IF EXISTS trg_jobs_auto_cols;",
-        "DELETE FROM jobs;",
-        "DELETE FROM companies_summary;",
-    ]
+    # 4. Compute Diff against D1
+    d1_rows = fetch_d1_existing_jobs()
+    lines = ["DROP TRIGGER IF EXISTS trg_jobs_auto_cols;"]
+
+    if d1_rows is None:
+        lines.append("DELETE FROM jobs;")
+        to_insert_values = list(neon_by_uid.values())
+    else:
+        d1_by_uid = {}
+        to_delete_ids = []
+        for r in d1_rows:
+            uid = r.get("generated_unique_id")
+            rid = r.get("id")
+            if not uid or uid not in neon_by_uid or uid in d1_by_uid:
+                if rid:
+                    to_delete_ids.append(rid)
+            else:
+                d1_by_uid[uid] = rid
+
+        to_insert_values = [val for uid, val in neon_by_uid.items() if uid not in d1_by_uid]
+        print(f"Diff result: {len(to_delete_ids)} expired to delete, {len(to_insert_values)} new to insert, {len(d1_by_uid)} unchanged")
+
+        for i in range(0, len(to_delete_ids), 80):
+            chunk = ", ".join(sql_str(x) for x in to_delete_ids[i : i + 80])
+            lines.append(f"DELETE FROM jobs WHERE id IN ({chunk});")
 
     job_cols = (
         "id, generated_unique_id, short_id, title, title_norm, company_name, company_norm, "
@@ -496,8 +541,11 @@ def main():
         "city, state, country, country_norm, country_code, continent, location_display, "
         "description_snippet, apply_url, ats_source, published_at, published_ms, latest_ms"
     )
-    append_batched_inserts(lines, "jobs", job_cols, job_values, max_bytes=50000, max_rows=20)
+    if to_insert_values:
+        append_batched_inserts(lines, "jobs", job_cols, to_insert_values, max_bytes=50000, max_rows=20, or_replace=True)
 
+    # 5. Refresh companies_summary (~650 rows, very small)
+    lines.append("DELETE FROM companies_summary;")
     cs_cols = (
         "company_norm, company_match, company_name, logo_url, website, description, "
         "ceo, full_time_employees, industry, city, state, country, countries_json, "
@@ -534,7 +582,7 @@ def main():
     all_countries_json = json.dumps(sorted(all_countries))
     lines.append(
         f"INSERT OR REPLACE INTO meta_stats (id, total_jobs, total_companies, countries_json, updated_at) "
-        f"VALUES (1, {len(job_values)}, {len(company_agg)}, {sql_str(all_countries_json)}, {now_ms});"
+        f"VALUES (1, {len(neon_by_uid)}, {len(company_agg)}, {sql_str(all_countries_json)}, {now_ms});"
     )
 
     with open("sync.sql", "w", encoding="utf-8") as f:

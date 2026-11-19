@@ -37,7 +37,6 @@
 
 
 
-
 name: Scheduled Job Scraper & DB Swap
 
 on:
@@ -70,9 +69,12 @@ jobs:
         run: |
           python main.py
 
-      - name: 2. Generate D1 Sync SQL (Delete Old + Insert New)
+      - name: 2. Generate D1 Sync SQL (Diff Only: Delete Expired + Insert New)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           python sync_d1.py
 
