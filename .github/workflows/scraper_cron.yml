@@ -36,8 +36,7 @@
 
 
 
-
-name: Scheduled Job Scraper & DB Swap
+name: "Scheduled Job Scraper & DB Swap"
 
 on:
   workflow_dispatch:
@@ -47,67 +46,52 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repository code
+      - name: "Check out repository code"
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: "Install dependencies"
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
 
-      - name: 1. Run Scraper and Neon DB Swap
+      - name: "1. Run Scraper and Neon DB Swap"
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          python main.py
+        run: python main.py
 
-      - name: 2. Generate D1 Sync SQL (Diff Only: Delete Expired + Insert New)
+      - name: "2. Generate D1 Sync SQL"
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          python sync_d1.py
+        run: python sync_d1.py
 
-      - name: Set up Node.js for Wrangler
+      - name: "Set up Node.js for Wrangler"
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: 3. Update Cloudflare D1 Database
+      - name: "3. Update Cloudflare D1 Database"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
         run: |
-          cat << 'EOF' > wrangler.jsonc
-          {
-            "name": "kodesword-sync",
-            "d1_databases": [
-              {
-                "binding": "JOBS_D1",
-                "database_name": "kodesword-jobs",
-                "database_id": "${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}"
-              }
-            ]
-          }
-          EOF
+          printf '{"name":"kodesword-sync","d1_databases":[{"binding":"JOBS_D1","database_name":"kodesword-jobs","database_id":"%s"}]}\n' "$CLOUDFLARE_D1_DATABASE_ID" > wrangler.jsonc
           npx --yes wrangler@latest d1 execute kodesword-jobs --remote --file=sync.sql --yes
 
-      - name: 4. Purge Cloudflare Cache (ONLY after D1 is updated)
+      - name: "4. Purge Cloudflare Cache"
         env:
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          curl --fail-with-body -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" \
-            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}'
+          curl --fail-with-body -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" --data '{"purge_everything":true}'
